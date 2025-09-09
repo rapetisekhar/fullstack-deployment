@@ -1,0 +1,233 @@
+# 🔐 PostgreSQL Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-secret
+  namespace: data-engine
+type: Opaque
+stringData:
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: password
+
+---
+
+# ⚙️ Custom PostgreSQL settings (safe override)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pg-custom-config
+  namespace: data-engine
+data:
+  postgresql.conf.custom.conf: |
+    wal_level = 'replica'
+    max_replication_slots = 10
+    max_wal_senders = 16
+    listen_addresses = '*'
+
+---
+
+# 🗃 PostgreSQL StatefulSet (2 writable pods)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-ha
+  namespace: data-engine
+spec:
+  serviceName: postgres-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: postgres-ha
+  template:
+    metadata:
+      labels:
+        app: postgres-ha
+    spec:
+      securityContext:
+        fsGroup: 1001  # 👈 Added for Longhorn volume write access
+      imagePullSecrets:
+        - name: awsecr-creds
+      containers:
+      - name: postgres
+        image: 339712944453.dkr.ecr.us-east-1.amazonaws.com/udh-release/postgresql:v2
+        imagePullPolicy: IfNotPresent
+        ports:
+          - containerPort: 5432
+        env:
+          - name: POSTGRESQL_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: pg-secret
+                key: POSTGRES_USER
+          - name: POSTGRESQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pg-secret
+                key: POSTGRES_PASSWORD
+          - name: POSTGRESQL_DATABASE
+            value: testdb
+        volumeMounts:
+          - name: pgdata
+            mountPath: /bitnami/postgresql
+          - name: custom-config
+            mountPath: /opt/bitnami/postgresql/conf/postgresql.conf.custom.conf
+            subPath: postgresql.conf.custom.conf
+      volumes:
+        - name: custom-config
+          configMap:
+            name: pg-custom-config
+  volumeClaimTemplates:
+  - metadata:
+      name: pgdata
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: microk8s-hostpath
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: data-engine
+spec:
+  type: NodePort
+  selector:
+    app: postgres-ha
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      nodePort: 30777  # must be in 30000-32767
+
+
+---
+
+# ⚙️ HAProxy configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy-cfg
+  namespace: data-engine
+data:
+  haproxy.cfg: |
+    global
+      maxconn 100
+      log stdout format raw local0
+
+    defaults
+      log     global
+      option  tcplog
+      timeout connect 5000ms
+      timeout client  50000ms
+      timeout server  50000ms
+
+    frontend postgres
+      bind *:5432
+      default_backend postgres_nodes
+
+    backend postgres_nodes
+      mode tcp
+      balance source
+      option tcp-check
+      server pg0 postgres-ha-0.postgres-headless.data-engine.svc.cluster.local:5432 check
+      server pg1 postgres-ha-1.postgres-headless.data-engine.svc.cluster.local:5432 check
+
+    listen stats
+      bind *:8404
+      mode http
+      stats enable
+      stats uri /
+      stats refresh 10s
+
+---
+
+# 🧱 HAProxy Deployment + Prometheus Exporter
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-haproxy
+  namespace: data-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-haproxy
+  template:
+    metadata:
+      labels:
+        app: postgres-haproxy
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+    spec:
+      imagePullSecrets:
+        - name: awsecr-creds
+      containers:
+        - name: haproxy
+          image: 339712944453.dkr.ecr.us-east-1.amazonaws.com/udh-release/postgres-haproxy:v2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+            - containerPort: 8404
+          volumeMounts:
+            - name: haproxy-config
+              mountPath: /usr/local/etc/haproxy/
+        - name: exporter
+          image: prom/haproxy-exporter:latest
+          args:
+            - '--haproxy.scrape-uri=http://localhost:8404/;csv'
+          ports:
+            - containerPort: 9101
+      volumes:
+        - name: haproxy-config
+          configMap:
+            name: haproxy-cfg
+
+---
+
+# 🌐 HAProxy NodePort Service (external access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-haproxy
+  namespace: data-engine
+spec:
+  type: NodePort
+  selector:
+    app: postgres-haproxy
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      nodePort: 30532
+    - name: haproxy-stats
+      port: 8404
+      targetPort: 8404
+      nodePort: 30531
+    - name: exporter
+      port: 9101
+      targetPort: 9101
+      nodePort: 30666
+
+---
+
+# 🧪 psql test client pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: psql-client
+  namespace: data-engine
+spec:
+  imagePullSecrets:
+    - name: awsecr-creds
+  containers:
+    - name: psql
+      image: 339712944453.dkr.ecr.us-east-1.amazonaws.com/udh-release/postgresql:v2
+      imagePullPolicy: IfNotPresent
+      command: ["sleep"]
+      args: ["infinity"]
+  restartPolicy: Never
+

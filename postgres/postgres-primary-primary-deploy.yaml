@@ -1,0 +1,60 @@
+# 🗃 PostgreSQL StatefulSet (2 writable pods)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-ha
+  namespace: udh-pipeline
+spec:
+  serviceName: postgres-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: postgres-ha
+  template:
+    metadata:
+      labels:
+        app: postgres-ha
+    spec:
+      containers:
+      - name: postgres
+        image: bitnami/postgresql:15
+        ports:
+          - containerPort: 5432
+        livenessProbe:
+          tcpSocket:
+            port: 5432
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        env:
+          - name: POSTGRESQL_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: pg-secret
+                key: POSTGRES_USER
+          - name: POSTGRESQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pg-secret
+                key: POSTGRES_PASSWORD
+          - name: POSTGRESQL_DATABASE
+            value: testdb
+        volumeMounts:
+          - name: pgdata
+            mountPath: /bitnami/postgresql
+          - name: custom-config
+            mountPath: /opt/bitnami/postgresql/conf/postgresql.conf.custom.conf
+            subPath: postgresql.conf.custom.conf
+      volumes:
+        - name: custom-config
+          configMap:
+            name: pg-custom-config
+  volumeClaimTemplates:
+  - metadata:
+      name: pgdata
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: microk8s-hostpath
+      resources:
+        requests:
+          storage: 10Gi
+
