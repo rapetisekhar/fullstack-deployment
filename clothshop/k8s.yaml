@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vv-backend
+  namespace: data-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vv-backend
+  template:
+    metadata:
+      labels:
+        app: vv-backend
+    spec:
+      containers:
+        - name: backend
+          image: sekharrapeti/vv-backend:v1
+          ports:
+            - containerPort: 4000
+          env:
+            - name: MONGO_URI
+              value: "mongodb://root:password@mongodb-0.mongodb.data-engine.svc.cluster.local:27017/test?authSource=admin"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vv-backend
+  namespace: data-engine
+spec:
+  selector:
+    app: vv-backend
+  ports:
+    - port: 4000
+      targetPort: 4000
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vv-frontend
+  namespace: data-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vv-frontend
+  template:
+    metadata:
+      labels:
+        app: vv-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: sekharrapeti/vv-frontend:v1
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vv-frontend
+  namespace: data-engine
+spec:
+  selector:
+    app: vv-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30090
+  type: NodePort
+
